@@ -1,4 +1,4 @@
-const { test, describe, beforeEach, afterEach, mock } = require('node:test');
+const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
@@ -11,24 +11,6 @@ const { createTwinTransport, resolveTwinPack } = require('../index.js');
 function tempDir() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtwin-router-'));
   return dir;
-}
-
-// Helper: create a fake cassette file
-function createCassette(dir, name, interactions = []) {
-  const cassette = {
-    version: '1.0',
-    meta: {
-      name,
-      created: new Date().toISOString(),
-      updated: new Date().toISOString(),
-      tags: [],
-      metadata: {}
-    },
-    interactions: interactions
-  };
-  const filePath = path.join(dir, `${name}.json`);
-  fs.writeFileSync(filePath, JSON.stringify(cassette, null, 2));
-  return filePath;
 }
 
 // Mock real transport
@@ -77,10 +59,18 @@ describe('createTwinTransport', () => {
   });
 
   test('accepts valid configuration for replay mode', () => {
-    createCassette(tempStore, 'test', []);
+    // Create a cassette file for the directory name
+    const cassetteName = path.basename(tempStore);
+    const cassettePath = path.join(tempStore, `${cassetteName}.json`);
+    fs.writeFileSync(cassettePath, JSON.stringify({
+      version: '1.0',
+      meta: { name: cassetteName },
+      interactions: []
+    }));
     const transport = createTwinTransport({
       mode: 'replay',
-      twinPack: tempStore
+      twinPack: tempStore,
+      engineOptions: { createIfMissing: false }
     });
     assert.strictEqual(transport.getMode(), 'replay');
     assert.strictEqual(typeof transport.complete, 'function');
@@ -90,7 +80,8 @@ describe('createTwinTransport', () => {
     const transport = createTwinTransport({
       mode: 'record',
       twinPack: tempStore,
-      realTransport: mockTransport()
+      realTransport: mockTransport(),
+      engineOptions: { createIfMissing: false }
     });
     assert.strictEqual(transport.getMode(), 'record');
     // Perform a record to create cassette
@@ -99,7 +90,8 @@ describe('createTwinTransport', () => {
       url: 'http://test.local/foo'
     });
     // Check that cassette was created
-    const cassettePath = path.join(tempStore, 'test.json');
+    const cassetteName = transport.getCassetteName();
+    const cassettePath = path.join(tempStore, `${cassetteName}.json`);
     assert.ok(fs.existsSync(cassettePath));
   });
 
@@ -107,7 +99,8 @@ describe('createTwinTransport', () => {
     const transport = createTwinTransport({
       mode: 'off',
       twinPack: tempStore,
-      realTransport: mockTransport({ status: 201, body: { created: true } })
+      realTransport: mockTransport({ status: 201, body: { created: true } }),
+      engineOptions: { createIfMissing: false }
     });
     assert.strictEqual(transport.getMode(), 'off');
     const response = await transport.complete({ method: 'POST', url: 'http://test.local/create' });
@@ -116,9 +109,16 @@ describe('createTwinTransport', () => {
 
   test('defaults mode to replay when NODE_ENV=test', () => {
     process.env.NODE_ENV = 'test';
-    createCassette(tempStore, 'test', []);
+    const cassetteName = path.basename(tempStore);
+    const cassettePath = path.join(tempStore, `${cassetteName}.json`);
+    fs.writeFileSync(cassettePath, JSON.stringify({
+      version: '1.0',
+      meta: { name: cassetteName },
+      interactions: []
+    }));
     const transport = createTwinTransport({
-      twinPack: tempStore
+      twinPack: tempStore,
+      engineOptions: { createIfMissing: false }
     });
     assert.strictEqual(transport.getMode(), 'replay');
   });
@@ -127,7 +127,8 @@ describe('createTwinTransport', () => {
     process.env.NODE_ENV = 'development';
     const transport = createTwinTransport({
       twinPack: tempStore,
-      realTransport: mockTransport()
+      realTransport: mockTransport(),
+      engineOptions: { createIfMissing: false }
     });
     assert.strictEqual(transport.getMode(), 'off');
   });
@@ -137,14 +138,15 @@ describe('createTwinTransport', () => {
     process.env.DIGITAL_TWIN_MODE = 'off';
     const transport = createTwinTransport({
       twinPack: tempStore,
-      realTransport: mockTransport()
+      realTransport: mockTransport(),
+      engineOptions: { createIfMissing: false }
     });
     assert.strictEqual(transport.getMode(), 'off');
   });
 
   test('throws on invalid mode', () => {
     assert.throws(
-      () => createTwinTransport({ mode: 'invalid', twinPack: tempStore, realTransport: mockTransport() }),
+      () => createTwinTransport({ mode: 'invalid', twinPack: tempStore, realTransport: mockTransport(), engineOptions: { createIfMissing: false } }),
       /Invalid mode "invalid"/
     );
   });
@@ -164,27 +166,31 @@ describe('createTwinTransport - replay behavior', () => {
   });
 
   test('returns recorded response on hash match', async () => {
+    // Use a dedicated cassette-named directory
     const cassetteName = 'my-api';
+    const cassetteDir = path.join(tempStore, cassetteName);
+    fs.mkdirSync(cassetteDir, { recursive: true });
+
     const request1 = {
       method: 'GET',
       url: 'https://api.example.com/users',
       headers: { 'Content-Type': 'application/json' },
       body: null
     };
-    const response1 = { status: 200, body: { users: [{ id: 1, name: 'Alice' }] } };
+    const response1 = { status: 200, headers: {}, body: { users: [{ id: 1, name: 'Alice' }] } };
 
-    // Create cassette manually
-    const { TwinStore, TwinEngine, normalizeAndHash } = require('digital-twin-core');
-    const store = new TwinStore({ storeDir: tempStore });
+    // Create cassette manually using the same store and engine that will be used by transport
+    const { TwinStore, TwinEngine } = require('digital-twin-core');
+    const store = new TwinStore({ storeDir: cassetteDir, createIfMissing: false });
     const engine = new TwinEngine({ store });
     await engine.create(cassetteName);
     await engine.record(request1, response1);
 
-    // Now create transport in replay mode
+    // Now create transport in replay mode (using cassetteDir as twinPack)
     const transport = createTwinTransport({
       mode: 'replay',
-      twinPack: tempStore,
-      realTransport: mockTransport()
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
     });
 
     const result = await transport.complete(request1);
@@ -193,25 +199,28 @@ describe('createTwinTransport - replay behavior', () => {
 
   test('throws detailed error on cache miss', async () => {
     const cassetteName = 'my-api';
+    const cassetteDir = path.join(tempStore, cassetteName);
+    fs.mkdirSync(cassetteDir, { recursive: true });
+
     const request1 = {
       method: 'GET',
       url: 'https://api.example.com/users',
       headers: {},
       body: null
     };
-    const response1 = { status: 200, body: { users: [] } };
+    const response1 = { status: 200, headers: {}, body: { users: [] } };
 
     // Create cassette
     const { TwinStore, TwinEngine } = require('digital-twin-core');
-    const store = new TwinStore({ storeDir: tempStore });
+    const store = new TwinStore({ storeDir: cassetteDir, createIfMissing: false });
     const engine = new TwinEngine({ store });
     await engine.create(cassetteName);
     await engine.record(request1, response1);
 
     const transport = createTwinTransport({
       mode: 'replay',
-      twinPack: tempStore,
-      realTransport: mockTransport()
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
     });
 
     // Different request
@@ -236,10 +245,14 @@ describe('createTwinTransport - replay behavior', () => {
   });
 
   test('handles multiple interactions in same cassette', async () => {
+    const cassetteName = 'multi';
+    const cassetteDir = path.join(tempStore, cassetteName);
+    fs.mkdirSync(cassetteDir, { recursive: true });
+
     const { TwinStore, TwinEngine } = require('digital-twin-core');
-    const store = new TwinStore({ storeDir: tempStore });
+    const store = new TwinStore({ storeDir: cassetteDir, createIfMissing: false });
     const engine = new TwinEngine({ store });
-    await engine.create('multi');
+    await engine.create(cassetteName);
 
     const requests = [
       { method: 'GET', url: 'https://api.example.com/a', headers: {}, body: null },
@@ -247,9 +260,9 @@ describe('createTwinTransport - replay behavior', () => {
       { method: 'DELETE', url: 'https://api.example.com/c?id=123', headers: {}, body: null }
     ];
     const responses = [
-      { status: 200, body: { result: 'a' } },
-      { status: 201, body: { result: 'b' } },
-      { status: 204, body: null }
+      { status: 200, headers: {}, body: { result: 'a' } },
+      { status: 201, headers: {}, body: { result: 'b' } },
+      { status: 204, headers: {}, body: null }
     ];
 
     for (let i = 0; i < requests.length; i++) {
@@ -258,7 +271,8 @@ describe('createTwinTransport - replay behavior', () => {
 
     const transport = createTwinTransport({
       mode: 'replay',
-      twinPack: tempStore
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
     });
 
     for (let i = 0; i < requests.length; i++) {
@@ -285,7 +299,8 @@ describe('createTwinTransport - record behavior', () => {
     const transport = createTwinTransport({
       mode: 'record',
       twinPack: tempStore,
-      realTransport: mockTransport({ status: 200, body: { recorded: true } })
+      realTransport: mockTransport({ status: 200, body: { recorded: true } }),
+      engineOptions: { createIfMissing: false }
     });
 
     const request = {
@@ -300,7 +315,8 @@ describe('createTwinTransport - record behavior', () => {
     assert.deepStrictEqual(result, expectedResponse);
 
     // Verify cassette file was created and contains the interaction
-    const cassettePath = path.join(tempStore, 'test.json');
+    const cassetteName = transport.getCassetteName();
+    const cassettePath = path.join(tempStore, `${cassetteName}.json`);
     assert.ok(fs.existsSync(cassettePath));
     const cassette = JSON.parse(fs.readFileSync(cassettePath, 'utf8'));
     assert.strictEqual(cassette.interactions.length, 1);
@@ -309,20 +325,25 @@ describe('createTwinTransport - record behavior', () => {
   });
 
   test('appends to existing cassette', async () => {
-    // Pre-create cassette with one interaction
+    // Pre-create cassette with one interaction using a named subdir
+    const cassetteName = 'multi';
+    const cassetteDir = path.join(tempStore, cassetteName);
+    fs.mkdirSync(cassetteDir, { recursive: true });
+
     const { TwinStore, TwinEngine } = require('digital-twin-core');
-    const store = new TwinStore({ storeDir: tempStore });
+    const store = new TwinStore({ storeDir: cassetteDir, createIfMissing: false });
     const engine = new TwinEngine({ store });
-    await engine.create('multi');
+    await engine.create(cassetteName);
     await engine.record(
       { method: 'GET', url: 'https://api.example.com/first', headers: {}, body: null },
-      { status: 200, body: { n: 1 } }
+      { status: 200, headers: {}, body: { n: 1 } }
     );
 
     const transport = createTwinTransport({
       mode: 'record',
-      twinPack: tempStore,
-      realTransport: mockTransport({ status: 200, body: { n: 2 } })
+      twinPack: cassetteDir,
+      realTransport: mockTransport({ status: 200, body: { n: 2 } }),
+      engineOptions: { createIfMissing: false }
     });
 
     await transport.complete({
@@ -333,7 +354,7 @@ describe('createTwinTransport - record behavior', () => {
     });
 
     // Check that cassette now has 2 interactions
-    const cassette = await store.read('multi');
+    const cassette = await store.read(cassetteName);
     assert.strictEqual(cassette.interactions.length, 2);
     assert.strictEqual(cassette.interactions[1].response.body.n, 2);
   });

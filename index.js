@@ -7,7 +7,7 @@ const {
   TwinStore,
   TwinEngine,
   normalizeAndHash,
-  cassette: { findByHash, validateCassette }
+  cassette: { findByHash }
 } = require('digital-twin-core');
 const fs = require('fs');
 const path = require('path');
@@ -85,21 +85,53 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
 
   // Determine cassette name from twinPack if possible
   try {
-    // Try to get cassette name from a manifest or use the pack name itself
     const stats = fs.statSync(storePath);
     if (stats.isDirectory()) {
       // Use the directory basename as cassette name
       cassetteName = path.basename(storePath);
     } else {
-      cassetteName = 'default';
+      // If it's a file, use filename without extension
+      cassetteName = path.basename(storePath, path.extname(storePath));
     }
   } catch (e) {
     cassetteName = 'default';
   }
 
-  // Ensure cassette exists in record mode
-  if (effectiveMode === 'record') {
-    // We'll create cassette on first record if it doesn't exist
+  // Cache for engine loaded state
+  let engineLoaded = false;
+
+  /**
+   * Ensure engine is loaded with cassette for replay/record modes.
+   * Creates cassette if it doesn't exist (for record mode).
+   */
+  async function ensureEngineLoaded() {
+    if (engineLoaded) {
+      return;
+    }
+
+    try {
+      // Try to load existing cassette
+      await engine.load(cassetteName);
+    } catch (err) {
+      if (err.message.includes('not found') || err.code === 'ENOENT') {
+        // Cassette doesn't exist - only allowed in record mode
+        if (effectiveMode === 'record') {
+          await engine.create(cassetteName, {
+            description: `Auto-created cassette for ${cassetteName}`,
+            createdBy: 'digital-twin-router'
+          });
+        } else {
+          throw new Error(
+            `Cassette not found: ${cassetteName} at ${storePath}\n` +
+            `Ensure the cassette exists or switch to 'record' mode to create it.`
+          );
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    engineLoaded = true;
   }
 
   /**
@@ -110,32 +142,16 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
   async function complete(request) {
     switch (effectiveMode) {
       case 'replay': {
-        // Hash the request to find matching interaction
-        const { hash } = normalizeAndHash(request, {
-          includeHeaders: engine.options.normalizerOptions?.includeHeaders ?? true,
-          includeBody: engine.options.normalizerOptions?.includeBody ?? true
-        });
+        await ensureEngineLoaded();
 
-        // Try to load cassette
-        let cassette;
-        try {
-          cassette = await store.read(cassetteName);
-        } catch (err) {
-          if (err.code === 'ENOENT' || err.message.includes('not found')) {
-            throw new Error(
-              `Cassette not found: ${cassetteName} at ${storePath}\n` +
-              `Ensure the cassette exists or switch to 'record' mode to create it.`
-            );
-          }
-          throw err;
-        }
+        const { hash } = normalizeAndHash(request, engine.normalizerOptions);
 
-        // Find interaction by hash
-        const match = findByHash(cassette, hash);
+        // Use the engine's replay method which handles matching
+        const result = await engine.replay(request);
 
-        if (!match) {
+        if (!result.match) {
           // Format available keys for error message
-          const available = cassette.interactions.map((int) => ({
+          const available = engine.cassette.interactions.map((int) => ({
             interactionId: int.interactionId,
             requestMethod: int.request.method,
             requestUrl: int.request.url
@@ -148,8 +164,7 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
           );
         }
 
-        // Return the recorded response (clone to avoid mutation)
-        return JSON.parse(JSON.stringify(match.response));
+        return result.response;
       }
 
       case 'record': {
@@ -157,19 +172,9 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
           throw new Error('realTransport is required in record mode');
         }
 
-        // Ensure cassette exists (create if not)
-        try {
-          await store.read(cassetteName);
-        } catch (err) {
-          if (err.code === 'ENOENT' || err.message.includes('not found')) {
-            await engine.create(cassetteName, {
-              description: `Auto-created cassette for ${cassetteName}`,
-              createdBy: 'digital-twin-router'
-            });
-          }
-        }
+        await ensureEngineLoaded();
 
-        // Actually perform the request
+        // Perform the actual request
         const response = await realTransport(request);
 
         // Record the interaction
