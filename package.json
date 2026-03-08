@@ -1,0 +1,26 @@
+{
+  "name": "digital-twin-router",
+  "version": "1.0.0",
+  "description": "Router/interceptor for digital twin recording and replay in ai-providers and emotion-engine",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "keywords": [
+    "digital-twin",
+    "router",
+    "interceptor",
+    "testing",
+    "ai-providers"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "digital-twin-core": "file:../digital-twin-core"
+  }
+}
