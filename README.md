@@ -76,7 +76,7 @@ Factory function that creates a transport wrapper.
 | Option | Type | Description |
 |--------|------|-------------|
 | `mode` | `string` (optional) | One of: `'replay'`, `'record'`, `'off'`. If not provided, defaults based on `NODE_ENV` (test → replay) or `DIGITAL_TWIN_MODE` env var. |
-| `twinPack` | `string` (required) | Path to a directory containing cassette JSON files, or an installed npm package name that contains a `cassettes/` directory. |
+| `twinPack` | `string` (required) | Path to a twin pack directory (local or npm package). The router resolves the path, reads `manifest.json` (if present) for `defaultCassetteId`, and automatically detects if cassettes are in a `cassettes/` subdirectory. |
 | `realTransport` | `Function` (required for non-replay modes) | Async function `(request) => Promise<response>` that performs actual network or external calls. |
 | `engineOptions` | `Object` (optional) | Additional options passed to `TwinEngine` (e.g., `normalizerOptions`, `redactionPatterns`). |
 
@@ -127,18 +127,32 @@ Resolves a `twinPack` value to an absolute filesystem path.
 | Variable | Effect |
 |----------|--------|
 | `DIGITAL_TWIN_MODE` | Override mode: `replay`, `record`, or `off`. Takes precedence over code config if set. |
+| `DIGITAL_TWIN_CASSETTE` | Override which cassette to use. Overrides `manifest.json`'s `defaultCassetteId` and the automatic derivation. |
 | `NODE_ENV` | When set to `test` and `DIGITAL_TWIN_MODE` is not set, defaults mode to `replay`. |
 
-## Cassette Storage
+## Cassette Storage and Resolution
 
-Cassettes are stored as JSON files in the `twinPack` directory under the hood by `digital-twin-core`. Each cassette is a file named `<cassette-name>.json` following the [Cassette Schema v1](https://github.com/your-org/digital-twin-core#cassette-schema-v1).
+Cassettes are stored as JSON files (`<cassette-name>.json`) following the [Cassette Schema v1](https://github.com/your-org/digital-twin-core#cassette-schema-v1).
 
 The `twinPack` can be:
 
-1. **Local directory path**: Path to a directory containing one or more cassette JSON files.
-2. **Package name**: If you install a package that provides cassettes (e.g., `npm install my-test-cassettes`), pass the package name as `twinPack`. The package should contain a `cassettes/` subdirectory with JSON files.
+1. **Local directory path**: A directory containing cassette JSON files.
+2. **Package name**: An installed npm package that provides cassettes.
 
-When passing a package name, the router resolves it via Node's module resolution and uses the package directory as the store location.
+### Resolution order for selecting the default cassette:
+
+1. `DIGITAL_TWIN_CASSETTE` environment variable (highest priority)
+2. `manifest.json`'s `defaultCassetteId` field (if present)
+3. Automatic fallback: the base name of the store directory (e.g., if store dir is `my-pack`, it looks for `my-pack.json`)
+
+### Store directory detection
+
+The router automatically determines where cassette files live:
+
+- If the `twinPack` directory contains a `cassettes/` subdirectory with `.json` or `.cassette` files, the `storeDir` is set to that subdirectory.
+- Otherwise, the `twinPack` directory itself is used as the `storeDir`.
+
+This allows twin packs to organize files either directly in the package root or within a `cassettes/` subfolder.
 
 ## Error Handling
 

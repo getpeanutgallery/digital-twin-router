@@ -392,3 +392,139 @@ describe('resolveTwinPack', () => {
     );
   });
 });
+
+describe('createTwinTransport - cassette resolution', () => {
+  let tempStore;
+
+  beforeEach(() => {
+    tempStore = tempDir();
+    // Clear env vars that affect resolution
+    delete process.env.NODE_ENV;
+    delete process.env.DIGITAL_TWIN_MODE;
+    delete process.env.DIGITAL_TWIN_CASSETTE;
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(tempStore, { recursive: true, force: true });
+    } catch (e) {}
+    delete process.env.DIGITAL_TWIN_CASSETTE;
+  });
+
+  test('uses manifest.defaultCassetteId when present', () => {
+    const packDir = path.join(tempStore, 'mypack');
+    fs.mkdirSync(packDir, { recursive: true });
+
+    // Create a cassette with a specific ID (does not match parent dir name)
+    const cassetteId = 'my-special-cassette';
+    const cassettePath = path.join(packDir, `${cassetteId}.json`);
+    fs.writeFileSync(cassettePath, JSON.stringify({
+      version: '1.0',
+      meta: { name: cassetteId },
+      interactions: []
+    }));
+
+    // Create manifest.json with defaultCassetteId
+    const manifestPath = path.join(packDir, 'manifest.json');
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      packType: 'twin-pack',
+      name: 'mypack',
+      defaultCassetteId: cassetteId,
+      cassettes: [`${cassetteId}.json`]
+    }));
+
+    const transport = createTwinTransport({
+      mode: 'replay',
+      twinPack: packDir,
+      engineOptions: { createIfMissing: false }
+    });
+
+    assert.strictEqual(transport.getCassetteName(), cassetteId);
+  });
+
+  test('DIGITAL_TWIN_CASSETTE env var overrides manifest', () => {
+    const packDir = path.join(tempStore, 'mypack');
+    fs.mkdirSync(packDir, { recursive: true });
+
+    // Create two cassettes
+    const cassetteA = 'cassette-a';
+    const cassetteB = 'cassette-b';
+    fs.writeFileSync(path.join(packDir, `${cassetteA}.json`), JSON.stringify({
+      version: '1.0', meta: { name: cassetteA }, interactions: []
+    }));
+    fs.writeFileSync(path.join(packDir, `${cassetteB}.json`), JSON.stringify({
+      version: '1.0', meta: { name: cassetteB }, interactions: []
+    }));
+
+    // Manifest points to cassette-a
+    fs.writeFileSync(path.join(packDir, 'manifest.json'), JSON.stringify({
+      packType: 'twin-pack',
+      name: 'mypack',
+      defaultCassetteId: cassetteA,
+      cassettes: [`${cassetteA}.json`, `${cassetteB}.json`]
+    }));
+
+    // Set env to cassette-b
+    process.env.DIGITAL_TWIN_CASSETTE = cassetteB;
+
+    const transport = createTwinTransport({
+      mode: 'replay',
+      twinPack: packDir,
+      engineOptions: { createIfMissing: false }
+    });
+
+    assert.strictEqual(transport.getCassetteName(), cassetteB);
+  });
+
+  test('detects cassettes/ subdirectory and uses it as storeDir', () => {
+    const packDir = path.join(tempStore, 'mypack');
+    const cassettesDir = path.join(packDir, 'cassettes');
+    fs.mkdirSync(cassettesDir, { recursive: true });
+
+    // Create cassette inside cassettes/ with a specific name
+    const cassetteId = 'pack-dir-cassette';
+    fs.writeFileSync(path.join(cassettesDir, `${cassetteId}.json`), JSON.stringify({
+      version: '1.0', meta: { name: cassetteId }, interactions: []
+    }));
+
+    // Use env var to specify cassette name (avoid fallback)
+    process.env.DIGITAL_TWIN_CASSETTE = cassetteId;
+
+    const transport = createTwinTransport({
+      mode: 'replay',
+      twinPack: packDir,
+      engineOptions: { createIfMissing: false }
+    });
+
+    assert.strictEqual(transport.getCassetteName(), cassetteId);
+    // Verify storePath (twinPack root) is still packDir
+    assert.strictEqual(transport.getStorePath(), packDir);
+  });
+
+  test('manifest and cassettes/ subdir combine correctly', () => {
+    const packDir = path.join(tempStore, 'mypack');
+    const cassettesDir = path.join(packDir, 'cassettes');
+    fs.mkdirSync(cassettesDir, { recursive: true });
+
+    const cassetteId = 'combined-test';
+    fs.writeFileSync(path.join(cassettesDir, `${cassetteId}.json`), JSON.stringify({
+      version: '1.0', meta: { name: cassetteId }, interactions: []
+    }));
+
+    // Manifest in packDir
+    fs.writeFileSync(path.join(packDir, 'manifest.json'), JSON.stringify({
+      packType: 'twin-pack',
+      name: 'mypack',
+      defaultCassetteId: cassetteId,
+      cassettes: [`cassettes/${cassetteId}.json`]
+    }));
+
+    const transport = createTwinTransport({
+      mode: 'replay',
+      twinPack: packDir,
+      engineOptions: { createIfMissing: false }
+    });
+
+    assert.strictEqual(transport.getCassetteName(), cassetteId);
+  });
+});

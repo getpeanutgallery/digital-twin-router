@@ -70,9 +70,62 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
   // Resolve twinPack to path
   const storePath = resolveTwinPack(twinPack);
 
-  // Create TwinStore and Engine
+  // Determine actual storeDir (where cassette files are stored)
+  let storeDir = storePath;
+  try {
+    const possibleSubDir = path.join(storePath, 'cassettes');
+    const stats = fs.statSync(possibleSubDir);
+    if (stats.isDirectory()) {
+      // Check if it contains any .json or .cassette files
+      const files = fs.readdirSync(possibleSubDir);
+      const hasCassettes = files.some(f => f.endsWith('.json') || f.endsWith('.cassette'));
+      if (hasCassettes) {
+        storeDir = possibleSubDir;
+      }
+    }
+  } catch (e) {
+    // If cassettes subdir doesn't exist or can't be read, keep storeDir = storePath
+  }
+
+  // Determine cassette name: priority 1) env DIGITAL_TWIN_CASSETTE, 2) manifest.json, 3) fallback
+  let cassetteName = null;
+
+  // 1. Override from environment
+  if (process.env.DIGITAL_TWIN_CASSETTE) {
+    cassetteName = process.env.DIGITAL_TWIN_CASSETTE;
+  } else {
+    // 2. Try manifest.json in storePath (package root)
+    const manifestPath = path.join(storePath, 'manifest.json');
+    if (fs.existsSync(manifestPath)) {
+      try {
+        const manifestContent = fs.readFileSync(manifestPath, 'utf-8');
+        const manifest = JSON.parse(manifestContent);
+        if (manifest.defaultCassetteId) {
+          cassetteName = manifest.defaultCassetteId;
+        }
+      } catch (e) {
+        // ignore manifest read/parse errors
+      }
+    }
+
+    // 3. Fallback: derive from storeDir basename
+    if (!cassetteName) {
+      try {
+        const stats = fs.statSync(storeDir);
+        if (stats.isDirectory()) {
+          cassetteName = path.basename(storeDir);
+        } else {
+          cassetteName = path.basename(storeDir, path.extname(storeDir));
+        }
+      } catch (e) {
+        cassetteName = 'default';
+      }
+    }
+  }
+
+  // Create TwinStore and Engine using the determined storeDir
   const store = new TwinStore({
-    storeDir: storePath,
+    storeDir: storeDir,
     ...engineOptions
   });
 
@@ -80,22 +133,6 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
     store,
     ...engineOptions
   });
-
-  let cassetteName = null;
-
-  // Determine cassette name from twinPack if possible
-  try {
-    const stats = fs.statSync(storePath);
-    if (stats.isDirectory()) {
-      // Use the directory basename as cassette name
-      cassetteName = path.basename(storePath);
-    } else {
-      // If it's a file, use filename without extension
-      cassetteName = path.basename(storePath, path.extname(storePath));
-    }
-  } catch (e) {
-    cassetteName = 'default';
-  }
 
   // Cache for engine loaded state
   let engineLoaded = false;
@@ -122,7 +159,7 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
           });
         } else {
           throw new Error(
-            `Cassette not found: ${cassetteName} at ${storePath}\n` +
+            `Cassette not found: ${cassetteName} at ${storeDir}\n` +
             `Ensure the cassette exists or switch to 'record' mode to create it.`
           );
         }
