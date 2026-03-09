@@ -7,7 +7,8 @@ const {
   TwinStore,
   TwinEngine,
   normalizeAndHash,
-  cassette: { findByHash }
+  cassette: { findByHash },
+  redaction: { redactResponse }
 } = require('digital-twin-core');
 const fs = require('fs');
 const path = require('path');
@@ -137,6 +138,10 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
   // Cache for engine loaded state
   let engineLoaded = false;
 
+  // Replay cursor (index into cassette.interactions). This enables sequential consumption
+  // when identical requests appear multiple times (e.g., retries).
+  let replayCursor = 0;
+
   /**
    * Ensure engine is loaded with cassette for replay/record modes.
    * Creates cassette if it doesn't exist (for record mode).
@@ -183,12 +188,23 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
 
         const { hash } = normalizeAndHash(request, engine.normalizerOptions);
 
-        // Use the engine's replay method which handles matching
-        const result = await engine.replay(request);
+        // Sequential replay consumption: when identical requests appear multiple times in
+        // the cassette (e.g., retries), match the first interaction at/after the current
+        // cursor and advance the cursor.
+        const interactions = engine.cassette?.interactions || [];
+        const matchCount = findByHash(engine.cassette, hash).length;
 
-        if (!result.match) {
+        let matchIndex = -1;
+        for (let i = replayCursor; i < interactions.length; i++) {
+          if (interactions[i].interactionId === hash) {
+            matchIndex = i;
+            break;
+          }
+        }
+
+        if (matchIndex === -1) {
           // Format available keys for error message
-          const available = engine.cassette.interactions.map((int) => ({
+          const available = interactions.map((int) => ({
             interactionId: int.interactionId,
             requestMethod: int.request.method,
             requestUrl: int.request.url
@@ -197,11 +213,16 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
           throw new Error(
             `Cache miss: No matching interaction found.\n` +
             `Computed hash: ${hash}\n` +
+            `Replay cursor: ${replayCursor} (cassette interactions: ${interactions.length}, total matches for hash: ${matchCount})\n` +
             `Available interactions: ${JSON.stringify(available, null, 2)}`
           );
         }
 
-        return result.response;
+        const interaction = interactions[matchIndex];
+        replayCursor = matchIndex + 1;
+
+        const response = redactResponse(interaction.response, engine.redactionPatterns);
+        return response;
       }
 
       case 'record': {

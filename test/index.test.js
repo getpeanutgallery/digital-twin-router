@@ -197,6 +197,44 @@ describe('createTwinTransport - replay behavior', () => {
     assert.deepStrictEqual(result, response1);
   });
 
+  test('consumes sequential matches for identical requests (retries)', async () => {
+    const cassetteName = 'retries';
+    const cassetteDir = path.join(tempStore, cassetteName);
+    fs.mkdirSync(cassetteDir, { recursive: true });
+
+    const request = {
+      method: 'POST',
+      url: 'https://api.example.com/chat/completions',
+      headers: { 'Content-Type': 'application/json' },
+      body: { model: 'x', messages: [{ role: 'user', content: 'hi' }] }
+    };
+
+    const responseA = { status: 429, headers: {}, body: { error: 'rate_limited' } };
+    const responseB = { status: 200, headers: {}, body: { ok: true, attempt: 2 } };
+
+    const { TwinStore, TwinEngine } = require('digital-twin-core');
+    const store = new TwinStore({ storeDir: cassetteDir, createIfMissing: false });
+    const engine = new TwinEngine({ store });
+    await engine.create(cassetteName);
+
+    // Record the *same* request twice with different responses.
+    await engine.record(request, responseA);
+    await engine.record(request, responseB);
+
+    const transport = createTwinTransport({
+      mode: 'replay',
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
+    });
+
+    // First call should return first recorded response, second call should return second.
+    assert.deepStrictEqual(await transport.complete(request), responseA);
+    assert.deepStrictEqual(await transport.complete(request), responseB);
+
+    // Third call is beyond recorded retries.
+    await assert.rejects(() => transport.complete(request), /Cache miss/);
+  });
+
   test('throws detailed error on cache miss', async () => {
     const cassetteName = 'my-api';
     const cassetteDir = path.join(tempStore, cassetteName);
