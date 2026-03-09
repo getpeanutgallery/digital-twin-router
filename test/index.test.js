@@ -409,6 +409,104 @@ describe('createTwinTransport - record behavior', () => {
     assert.strictEqual(cassette.interactions[0].response.status, 200);
   });
 
+  test('records an error interaction when realTransport throws', async () => {
+    const realTransport = async () => {
+      const err = new Error('boom Authorization: Bearer SECRET_TOKEN api_key=SHOULD_NOT_LEAK');
+      err.name = 'TransportError';
+      err.code = 'EBOOM';
+      err.status = 503;
+      err.debug = {
+        headers: { Authorization: 'Bearer SECRET_TOKEN', 'x-api-key': 'SHOULD_NOT_LEAK' },
+        body: { api_key: 'SHOULD_NOT_LEAK' }
+      };
+      throw err;
+    };
+
+    const transport = createTwinTransport({
+      mode: 'record',
+      twinPack: tempStore,
+      realTransport,
+      engineOptions: { createIfMissing: false }
+    });
+
+    const request = {
+      method: 'GET',
+      url: 'https://api.example.com/fail',
+      headers: { Authorization: 'Bearer SECRET_TOKEN', 'x-api-key': 'SHOULD_NOT_LEAK' },
+      body: null
+    };
+
+    await assert.rejects(() => transport.complete(request), /boom/);
+
+    const cassetteName = transport.getCassetteName();
+    const cassettePath = path.join(tempStore, `${cassetteName}.json`);
+    const cassette = JSON.parse(fs.readFileSync(cassettePath, 'utf8'));
+
+    assert.strictEqual(cassette.interactions.length, 1);
+    const recorded = cassette.interactions[0].response;
+
+    assert.strictEqual(recorded.__digitalTwinError, true);
+    assert.strictEqual(recorded.error.code, 'EBOOM');
+    assert.strictEqual(recorded.error.status, 503);
+
+    const serialized = JSON.stringify(recorded);
+    assert.ok(!serialized.includes('SECRET_TOKEN'));
+    assert.ok(!serialized.includes('SHOULD_NOT_LEAK'));
+  });
+
+  test('replay rethrows recorded error payload', async () => {
+    const cassetteName = 'replay-error';
+    const cassetteDir = path.join(tempStore, cassetteName);
+    fs.mkdirSync(cassetteDir, { recursive: true });
+
+    const request = {
+      method: 'GET',
+      url: 'https://api.example.com/error',
+      headers: { 'Content-Type': 'application/json' },
+      body: null
+    };
+
+    const { TwinStore, TwinEngine } = require('digital-twin-core');
+    const store = new TwinStore({ storeDir: cassetteDir, createIfMissing: false });
+    const engine = new TwinEngine({ store });
+    await engine.create(cassetteName);
+
+    const recordedErrorResponse = {
+      __digitalTwinError: true,
+      status: 599,
+      headers: {},
+      body: null,
+      error: {
+        name: 'UpstreamError',
+        message: 'upstream failed',
+        code: 'EUPSTREAM',
+        status: 418,
+        debug: { why: 'teapot' }
+      }
+    };
+
+    await engine.record(request, recordedErrorResponse);
+
+    const transport = createTwinTransport({
+      mode: 'replay',
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
+    });
+
+    await assert.rejects(
+      () => transport.complete(request),
+      (err) => {
+        assert.strictEqual(err.name, 'UpstreamError');
+        assert.strictEqual(err.message, 'upstream failed');
+        assert.strictEqual(err.code, 'EUPSTREAM');
+        assert.strictEqual(err.status, 418);
+        assert.deepStrictEqual(err.debug, { why: 'teapot' });
+        assert.strictEqual(err.__digitalTwinRecordedError, true);
+        return true;
+      }
+    );
+  });
+
   test('appends to existing cassette', async () => {
     // Pre-create cassette with one interaction using a named subdir
     const cassetteName = 'multi';

@@ -8,7 +8,7 @@ const {
   TwinEngine,
   normalizeAndHash,
   cassette: { findByHash },
-  redaction: { redactResponse }
+  redaction: { redactResponse, redactBody, redactHeaders }
 } = require('digital-twin-core');
 const fs = require('fs');
 const path = require('path');
@@ -46,6 +46,112 @@ function stableStringify(value) {
 
 function getReplayCursorKey({ storeDir, cassetteName, normalizerOptions }) {
   return `${storeDir}::${cassetteName}::${stableStringify(normalizerOptions)}`;
+}
+
+
+function isRecordedErrorResponse(response) {
+  if (!response) return false;
+  if (response.__digitalTwinError) return true;
+  if (response.body && response.body.__digitalTwinError) return true;
+  return false;
+}
+
+function getErrorMetaFromRecordedErrorResponse(response) {
+  if (!response) return null;
+  if (response.error && typeof response.error === 'object') return response.error;
+  if (response.body && response.body.__digitalTwinError) return response.body;
+  // Back-compat / fallthrough: treat top-level as meta
+  return response;
+}
+
+function buildRecordedErrorResponse(err, redactionPatterns = []) {
+  const extraPatterns = [
+    // Messages often contain tokens without JSON structure.
+    {
+      name: 'Bearer token in text',
+      pattern: /Bearer\s+[A-Za-z0-9._-]+/g,
+      type: 'body',
+      replacement: 'Bearer REDACTED'
+    },
+    {
+      name: 'apiKey in text',
+      pattern: /api[_-]?key\s*[:=]\s*['" ]?[A-Za-z0-9._-]+['" ]?/gi,
+      type: 'body',
+      replacement: 'api_key=REDACTED'
+    },
+    {
+      name: 'x-api-key in JSON',
+      pattern: /"x-api-key"\s*:\s*"[^"]+"/gi,
+      type: 'body',
+      replacement: '"x-api-key": "REDACTED"'
+    },
+    {
+      name: 'authorization bearer in JSON (case-insensitive)',
+      pattern: /"authorization"\s*:\s*"Bearer [^"]+"/gi,
+      type: 'body',
+      replacement: '"authorization": "Bearer REDACTED"'
+    }
+  ];
+
+  const patterns = [...redactionPatterns, ...extraPatterns];
+
+  const status =
+    err?.status ??
+    err?.statusCode ??
+    err?.response?.status ??
+    err?.response?.statusCode ??
+    err?.cause?.status ??
+    undefined;
+
+  const debug = {};
+
+  if (err?.stack) debug.stack = redactBody(err.stack, patterns);
+
+  if (err?.debug !== undefined) {
+    debug.debug = redactBody(err.debug, patterns);
+  }
+
+  if (err?.details !== undefined) {
+    debug.details = redactBody(err.details, patterns);
+  }
+
+  if (err?.response) {
+    debug.response = {
+      status: err.response.status ?? err.response.statusCode,
+      headers: redactHeaders(err.response.headers || {}, patterns),
+      data: redactBody(err.response.data, patterns)
+    };
+  }
+
+  // If debug ended up empty, omit it to keep cassettes clean.
+  const hasDebug = Object.keys(debug).length > 0;
+
+  const message = redactBody(err?.message ?? String(err), patterns);
+
+  return {
+    __digitalTwinError: true,
+    status: status ?? 599,
+    headers: {},
+    body: null,
+    error: {
+      name: err?.name || 'Error',
+      message,
+      code: err?.code,
+      status,
+      debug: hasDebug ? debug : undefined
+    }
+  };
+}
+
+function rethrowRecordedError(response) {
+  const meta = getErrorMetaFromRecordedErrorResponse(response) || {};
+  const err = new Error(meta.message || 'Recorded transport error');
+  if (meta.name) err.name = meta.name;
+  if (meta.code !== undefined) err.code = meta.code;
+  if (meta.status !== undefined) err.status = meta.status;
+  if (meta.debug !== undefined) err.debug = meta.debug;
+  err.__digitalTwinRecordedError = true;
+  throw err;
 }
 
 /**
@@ -267,6 +373,11 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
         replayCursor = matchIndex + 1;
         replayCursorByCassetteKey.set(replayKey, replayCursor);
 
+        if (isRecordedErrorResponse(interaction.response)) {
+          const redacted = redactResponse(interaction.response, engine.redactionPatterns);
+          rethrowRecordedError(redacted);
+        }
+
         const response = redactResponse(interaction.response, engine.redactionPatterns);
         return response;
       }
@@ -278,13 +389,26 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
 
         await ensureEngineLoaded();
 
-        // Perform the actual request
-        const response = await realTransport(request);
+        try {
+          // Perform the actual request
+          const response = await realTransport(request);
 
-        // Record the interaction
-        await engine.record(request, response);
+          // Record the interaction
+          await engine.record(request, response);
 
-        return response;
+          return response;
+        } catch (err) {
+          const errorResponse = buildRecordedErrorResponse(err, engine.redactionPatterns);
+
+          // Best-effort: still record the failed interaction so replay has no gaps.
+          try {
+            await engine.record(request, errorResponse);
+          } catch (recordErr) {
+            // Do not mask the real transport error.
+          }
+
+          throw err;
+        }
       }
 
       case 'off': {
