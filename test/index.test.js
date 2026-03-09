@@ -235,6 +235,53 @@ describe('createTwinTransport - replay behavior', () => {
     await assert.rejects(() => transport.complete(request), /Cache miss/);
   });
 
+  test('consumes sequential matches across transport instances for identical requests', async () => {
+    const cassetteName = 'retries-across-instances';
+    const cassetteDir = path.join(tempStore, cassetteName);
+    fs.mkdirSync(cassetteDir, { recursive: true });
+
+    const request = {
+      method: 'POST',
+      url: 'https://api.example.com/chat/completions',
+      headers: { 'Content-Type': 'application/json' },
+      body: { model: 'x', messages: [{ role: 'user', content: 'hi' }] }
+    };
+
+    const responseA = { status: 429, headers: {}, body: { error: 'rate_limited' } };
+    const responseB = { status: 200, headers: {}, body: { ok: true, attempt: 2 } };
+
+    const { TwinStore, TwinEngine } = require('digital-twin-core');
+    const store = new TwinStore({ storeDir: cassetteDir, createIfMissing: false });
+    const engine = new TwinEngine({ store });
+    await engine.create(cassetteName);
+
+    // Record the *same* request twice with different responses.
+    await engine.record(request, responseA);
+    await engine.record(request, responseB);
+
+    // NOTE: emotion-engine/ai-providers creates a new transport per request.
+    const transport1 = createTwinTransport({
+      mode: 'replay',
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
+    });
+    assert.deepStrictEqual(await transport1.complete(request), responseA);
+
+    const transport2 = createTwinTransport({
+      mode: 'replay',
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
+    });
+    assert.deepStrictEqual(await transport2.complete(request), responseB);
+
+    const transport3 = createTwinTransport({
+      mode: 'replay',
+      twinPack: cassetteDir,
+      engineOptions: { createIfMissing: false }
+    });
+    await assert.rejects(() => transport3.complete(request), /Cache miss/);
+  });
+
   test('throws detailed error on cache miss', async () => {
     const cassetteName = 'my-api';
     const cassetteDir = path.join(tempStore, cassetteName);

@@ -13,6 +13,41 @@ const {
 const fs = require('fs');
 const path = require('path');
 
+// Module-level replay cursor map to persist sequential replay consumption across
+// transport instances (e.g., when createTwinTransport is created per request).
+// Keyed by storeDir + cassetteName (+ normalizerOptions).
+const replayCursorByCassetteKey = new Map();
+
+function stableStringify(value) {
+  try {
+    if (value === null || value === undefined) return '';
+    if (typeof value !== 'object') return String(value);
+
+    const seen = new WeakSet();
+    const sorter = (v) => {
+      if (v === null || v === undefined) return v;
+      if (typeof v !== 'object') return v;
+      if (seen.has(v)) return '[Circular]';
+      seen.add(v);
+      if (Array.isArray(v)) return v.map(sorter);
+      const out = {};
+      for (const k of Object.keys(v).sort()) {
+        out[k] = sorter(v[k]);
+      }
+      return out;
+    };
+
+    return JSON.stringify(sorter(value));
+  } catch (e) {
+    // Last resort: avoid throwing when building cursor keys
+    return '';
+  }
+}
+
+function getReplayCursorKey({ storeDir, cassetteName, normalizerOptions }) {
+  return `${storeDir}::${cassetteName}::${stableStringify(normalizerOptions)}`;
+}
+
 /**
  * Resolve twinPack to a filesystem path.
  * twinPack can be either:
@@ -138,8 +173,9 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
   // Cache for engine loaded state
   let engineLoaded = false;
 
-  // Replay cursor (index into cassette.interactions). This enables sequential consumption
-  // when identical requests appear multiple times (e.g., retries).
+  // Local replay cursor (index into cassette.interactions). This is synchronized with a
+  // module-level cursor map so sequential replay consumption persists across transport
+  // instances (e.g., when the caller constructs a new transport per request).
   let replayCursor = 0;
 
   /**
@@ -191,6 +227,15 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
         // Sequential replay consumption: when identical requests appear multiple times in
         // the cassette (e.g., retries), match the first interaction at/after the current
         // cursor and advance the cursor.
+        //
+        // Cursor is persisted across transport instances via module-level map.
+        const replayKey = getReplayCursorKey({
+          storeDir,
+          cassetteName,
+          normalizerOptions: engine.normalizerOptions
+        });
+        replayCursor = replayCursorByCassetteKey.get(replayKey) ?? 0;
+
         const interactions = engine.cassette?.interactions || [];
         const matchCount = findByHash(engine.cassette, hash).length;
 
@@ -220,6 +265,7 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
 
         const interaction = interactions[matchIndex];
         replayCursor = matchIndex + 1;
+        replayCursorByCassetteKey.set(replayKey, replayCursor);
 
         const response = redactResponse(interaction.response, engine.redactionPatterns);
         return response;
