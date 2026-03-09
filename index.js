@@ -404,7 +404,29 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
           try {
             await engine.record(request, errorResponse);
           } catch (recordErr) {
-            // Do not mask the real transport error.
+            // Do not mask the real transport error, but do not swallow the recording failure.
+            // Attach redacted context so callers can debug missing interactions/cassette gaps.
+            try {
+              const redactedRecordErr = buildRecordedErrorResponse(
+                recordErr,
+                engine.redactionPatterns
+              );
+
+              if (err && typeof err === 'object') {
+                err.__digitalTwinRecordError = {
+                  name: redactedRecordErr?.error?.name,
+                  message: redactedRecordErr?.error?.message,
+                  stack: redactedRecordErr?.error?.debug?.stack
+                };
+              }
+
+              // One-line warning only; avoid printing request/response details.
+              console.warn(
+                `[digital-twin-router] Failed to record error interaction: ${redactedRecordErr?.error?.message || 'unknown error'}`
+              );
+            } catch (attachErr) {
+              // Never let instrumentation break the main error path.
+            }
           }
 
           throw err;

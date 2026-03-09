@@ -454,6 +454,60 @@ describe('createTwinTransport - record behavior', () => {
     assert.ok(!serialized.includes('SHOULD_NOT_LEAK'));
   });
 
+  test('surfaces engine.record failure when recording an error interaction', async () => {
+    const realTransport = async () => {
+      throw new Error('boom');
+    };
+
+    const transport = createTwinTransport({
+      mode: 'record',
+      twinPack: tempStore,
+      realTransport,
+      engineOptions: { createIfMissing: false }
+    });
+
+    // Simulate a failure inside the error-recording path.
+    const engine = transport.getEngine();
+    const originalRecord = engine.record.bind(engine);
+    engine.record = async (req, res, options) => {
+      if (res && res.__digitalTwinError) {
+        throw new Error('store write failed Authorization: Bearer SECRET_TOKEN');
+      }
+      return originalRecord(req, res, options);
+    };
+
+    const originalWarn = console.warn;
+    let warnLine = '';
+    console.warn = (...args) => {
+      warnLine = args.map(String).join(' ');
+    };
+
+    const request = {
+      method: 'GET',
+      url: 'https://api.example.com/fail',
+      headers: { Authorization: 'Bearer SECRET_TOKEN' },
+      body: null
+    };
+
+    try {
+      await assert.rejects(
+        () => transport.complete(request),
+        (err) => {
+          assert.strictEqual(err.message, 'boom');
+          assert.ok(err.__digitalTwinRecordError);
+          assert.match(err.__digitalTwinRecordError.message, /Bearer REDACTED/);
+          assert.ok(!err.__digitalTwinRecordError.message.includes('SECRET_TOKEN'));
+          return true;
+        }
+      );
+
+      assert.ok(warnLine.includes('Failed to record error interaction'));
+      assert.ok(!warnLine.includes('SECRET_TOKEN'));
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
   test('replay rethrows recorded error payload', async () => {
     const cassetteName = 'replay-error';
     const cassetteDir = path.join(tempStore, cassetteName);
