@@ -454,6 +454,70 @@ describe('createTwinTransport - record behavior', () => {
     assert.ok(!serialized.includes('SHOULD_NOT_LEAK'));
   });
 
+  test('records normalized status/request-id/classification and structured response from debug fallback', async () => {
+    const realTransport = async () => {
+      const err = new Error('wrapped upstream failure');
+      err.name = 'WrappedProviderError';
+      err.code = 'ERR_BAD_RESPONSE';
+      err.debug = {
+        provider: 'openrouter',
+        response: {
+          status: 429,
+          headers: {
+            'x-request-id': 'req_debug_123',
+            'x-api-key': 'SHOULD_NOT_LEAK'
+          },
+          body: JSON.stringify({
+            error: {
+              code: 429,
+              message: 'Rate limited',
+              metadata: { provider_name: 'openrouter' }
+            }
+          })
+        },
+        providerError: {
+          httpStatus: 429,
+          code: 429,
+          message: 'Rate limited',
+          metadata: { provider_name: 'openrouter' }
+        }
+      };
+      err.aiTargets = { classification: 'retryable' };
+      throw err;
+    };
+
+    const transport = createTwinTransport({
+      mode: 'record',
+      twinPack: tempStore,
+      realTransport,
+      engineOptions: { createIfMissing: false }
+    });
+
+    await assert.rejects(
+      () => transport.complete({ method: 'GET', url: 'https://api.example.com/debug-fallback', headers: {}, body: null }),
+      /wrapped upstream failure/
+    );
+
+    const cassetteName = transport.getCassetteName();
+    const cassettePath = path.join(tempStore, `${cassetteName}.json`);
+    const cassette = JSON.parse(fs.readFileSync(cassettePath, 'utf8'));
+    const recorded = cassette.interactions[0].response;
+
+    assert.strictEqual(recorded.error.status, 429);
+    assert.strictEqual(recorded.error.requestId, 'req_debug_123');
+    assert.strictEqual(recorded.error.classification, 'retryable');
+    assert.deepStrictEqual(recorded.error.response, {
+      error: {
+        code: 429,
+        message: 'Rate limited',
+        metadata: { provider_name: 'openrouter' }
+      }
+    });
+    assert.strictEqual(recorded.error.debug.response.status, 429);
+    assert.strictEqual(recorded.error.debug.response.headers['x-request-id'], 'req_debug_123');
+    assert.ok(!JSON.stringify(recorded).includes('SHOULD_NOT_LEAK'));
+  });
+
   test('surfaces engine.record failure when recording an error interaction', async () => {
     const realTransport = async () => {
       throw new Error('boom');
@@ -535,7 +599,17 @@ describe('createTwinTransport - record behavior', () => {
         message: 'upstream failed',
         code: 'EUPSTREAM',
         status: 418,
-        debug: { why: 'teapot' }
+        requestId: 'req_replay_123',
+        classification: 'retryable',
+        response: { error: { code: 418, message: 'teapot' } },
+        debug: {
+          why: 'teapot',
+          response: {
+            status: 418,
+            headers: { 'x-request-id': 'req_replay_123' },
+            data: { error: { code: 418, message: 'teapot' } }
+          }
+        }
       }
     };
 
@@ -554,7 +628,21 @@ describe('createTwinTransport - record behavior', () => {
         assert.strictEqual(err.message, 'upstream failed');
         assert.strictEqual(err.code, 'EUPSTREAM');
         assert.strictEqual(err.status, 418);
-        assert.deepStrictEqual(err.debug, { why: 'teapot' });
+        assert.strictEqual(err.requestId, 'req_replay_123');
+        assert.deepStrictEqual(err.aiTargets, { classification: 'retryable' });
+        assert.deepStrictEqual(err.response, {
+          status: 418,
+          data: { error: { code: 418, message: 'teapot' } },
+          headers: { 'x-request-id': 'req_replay_123' }
+        });
+        assert.deepStrictEqual(err.debug, {
+          why: 'teapot',
+          response: {
+            status: 418,
+            headers: { 'x-request-id': 'req_replay_123' },
+            data: { error: { code: 418, message: 'teapot' } }
+          }
+        });
         assert.strictEqual(err.__digitalTwinRecordedError, true);
         return true;
       }

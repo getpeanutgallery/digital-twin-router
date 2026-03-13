@@ -17,6 +17,7 @@ const path = require('path');
 // transport instances (e.g., when createTwinTransport is created per request).
 // Keyed by storeDir + cassetteName (+ normalizerOptions).
 const replayCursorByCassetteKey = new Map();
+const REQUEST_ID_HEADER_PATTERN = /(request[-_]?id|trace[-_]?id|correlation[-_]?id|x-amzn[-_]?requestid|cf-ray|openrouter[-_]?request[-_]?id)/i;
 
 function stableStringify(value) {
   try {
@@ -64,6 +65,122 @@ function getErrorMetaFromRecordedErrorResponse(response) {
   return response;
 }
 
+function normalizeHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return {};
+
+  const out = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined || value === null) continue;
+    out[String(key).toLowerCase()] = Array.isArray(value)
+      ? value.map((item) => String(item)).join(',')
+      : String(value);
+  }
+  return out;
+}
+
+function getErrorStatus(err) {
+  const status =
+    err?.response?.status ??
+    err?.response?.statusCode ??
+    err?.debug?.response?.status ??
+    err?.debug?.providerError?.httpStatus ??
+    err?.status ??
+    err?.statusCode ??
+    err?.cause?.status;
+
+  return Number.isInteger(status) ? status : undefined;
+}
+
+function getErrorRequestId(err) {
+  const headers = normalizeHeaders(
+    err?.response?.headers ??
+    err?.debug?.response?.headers ??
+    null
+  );
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (REQUEST_ID_HEADER_PATTERN.test(key) && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function parseDebugResponseBody(body) {
+  if (body === null || body === undefined) return undefined;
+  if (typeof body === 'object') return body;
+  if (typeof body !== 'string') return undefined;
+
+  const trimmed = body.trim();
+  if (!trimmed) return undefined;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+}
+
+function getStructuredDebugProviderError(err) {
+  const providerError = err?.debug?.providerError;
+  if (!providerError || typeof providerError !== 'object') return undefined;
+
+  const code = providerError.code;
+  const message = providerError.message ?? err?.message;
+  const metadata = providerError.metadata;
+
+  return {
+    error: {
+      ...(code !== undefined ? { code } : {}),
+      ...(message !== undefined ? { message } : {}),
+      ...(metadata !== undefined ? { metadata } : {})
+    }
+  };
+}
+
+function getErrorResponseBody(err) {
+  if (err?.response?.data !== undefined) {
+    return err.response.data;
+  }
+
+  const parsedDebugBody = parseDebugResponseBody(err?.debug?.response?.body);
+  if (parsedDebugBody !== undefined) {
+    return parsedDebugBody;
+  }
+
+  return getStructuredDebugProviderError(err);
+}
+
+function getErrorClassification(err) {
+  if (typeof err?.aiTargets?.classification === 'string' && err.aiTargets.classification.trim()) {
+    return err.aiTargets.classification.trim();
+  }
+
+  return undefined;
+}
+
+function buildNormalizedDebugResponse(err, patterns) {
+  const status = getErrorStatus(err);
+  const headers = redactHeaders(
+    err?.response?.headers
+      ?? err?.debug?.response?.headers
+      ?? {},
+    patterns
+  );
+  const data = redactBody(getErrorResponseBody(err), patterns);
+
+  if (status === undefined && Object.keys(headers).length === 0 && data === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(status !== undefined ? { status } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    ...(data !== undefined ? { data } : {})
+  };
+}
+
 function buildRecordedErrorResponse(err, redactionPatterns = []) {
   const extraPatterns = [
     // Messages often contain tokens without JSON structure.
@@ -95,13 +212,10 @@ function buildRecordedErrorResponse(err, redactionPatterns = []) {
 
   const patterns = [...redactionPatterns, ...extraPatterns];
 
-  const status =
-    err?.status ??
-    err?.statusCode ??
-    err?.response?.status ??
-    err?.response?.statusCode ??
-    err?.cause?.status ??
-    undefined;
+  const status = getErrorStatus(err);
+  const requestId = getErrorRequestId(err);
+  const classification = getErrorClassification(err);
+  const response = redactBody(getErrorResponseBody(err), patterns);
 
   const debug = {};
 
@@ -115,12 +229,9 @@ function buildRecordedErrorResponse(err, redactionPatterns = []) {
     debug.details = redactBody(err.details, patterns);
   }
 
-  if (err?.response) {
-    debug.response = {
-      status: err.response.status ?? err.response.statusCode,
-      headers: redactHeaders(err.response.headers || {}, patterns),
-      data: redactBody(err.response.data, patterns)
-    };
+  const normalizedResponse = buildNormalizedDebugResponse(err, patterns);
+  if (normalizedResponse) {
+    debug.response = normalizedResponse;
   }
 
   // If debug ended up empty, omit it to keep cassettes clean.
@@ -137,7 +248,10 @@ function buildRecordedErrorResponse(err, redactionPatterns = []) {
       name: err?.name || 'Error',
       message,
       code: err?.code,
-      status,
+      ...(status !== undefined ? { status } : {}),
+      ...(requestId !== undefined ? { requestId } : {}),
+      ...(classification !== undefined ? { classification } : {}),
+      ...(response !== undefined ? { response } : {}),
       debug: hasDebug ? debug : undefined
     }
   };
@@ -150,6 +264,17 @@ function rethrowRecordedError(response) {
   if (meta.code !== undefined) err.code = meta.code;
   if (meta.status !== undefined) err.status = meta.status;
   if (meta.debug !== undefined) err.debug = meta.debug;
+  if (meta.requestId !== undefined) err.requestId = meta.requestId;
+  if (meta.response !== undefined) {
+    err.response = {
+      status: meta.status,
+      data: meta.response,
+      headers: meta.debug?.response?.headers || {}
+    };
+  }
+  if (meta.classification !== undefined) {
+    err.aiTargets = { classification: meta.classification };
+  }
   err.__digitalTwinRecordedError = true;
   throw err;
 }
