@@ -18,6 +18,7 @@ const path = require('path');
 // Keyed by storeDir + cassetteName (+ normalizerOptions).
 const replayCursorByCassetteKey = new Map();
 const REQUEST_ID_HEADER_PATTERN = /(request[-_]?id|trace[-_]?id|correlation[-_]?id|x-amzn[-_]?requestid|cf-ray|openrouter[-_]?request[-_]?id)/i;
+const RECORDED_FAILURE_VERSION = 'digital-twin-router.recorded-failure/v1';
 
 function stableStringify(value) {
   try {
@@ -160,6 +161,45 @@ function getErrorClassification(err) {
   return undefined;
 }
 
+function getProviderExchange(err) {
+  const providerRequest = err?.providerRequest;
+  const providerResponse = err?.providerResponse;
+
+  return {
+    ...(providerRequest && typeof providerRequest === 'object' ? { providerRequest } : {}),
+    ...(providerResponse && typeof providerResponse === 'object' ? { providerResponse } : {})
+  };
+}
+
+function getFailureRoutingMeta(err) {
+  return {
+    ...(typeof err?.provider === 'string' && err.provider.trim() ? { provider: err.provider.trim() } : {}),
+    ...(typeof err?.failureCategory === 'string' && err.failureCategory.trim() ? { failureCategory: err.failureCategory.trim() } : {}),
+    ...(typeof err?.failureCode === 'string' && err.failureCode.trim() ? { failureCode: err.failureCode.trim() } : {}),
+    ...(typeof err?.retryable === 'boolean' ? { retryable: err.retryable } : {})
+  };
+}
+
+function buildRecordedFailureRef({ interaction, hash, cassetteName, storeDir, request }) {
+  const cassettePath = path.join(storeDir, `${cassetteName}.json`);
+
+  return {
+    version: RECORDED_FAILURE_VERSION,
+    cassetteName,
+    storeDir,
+    cassettePath,
+    interactionId: interaction?.id,
+    requestHash: hash,
+    recordedAt: interaction?.timestamp,
+    request: request && typeof request === 'object'
+      ? {
+          method: request.method,
+          url: request.url
+        }
+      : undefined
+  };
+}
+
 function buildNormalizedDebugResponse(err, patterns) {
   const status = getErrorStatus(err);
   const headers = redactHeaders(
@@ -181,7 +221,7 @@ function buildNormalizedDebugResponse(err, patterns) {
   };
 }
 
-function buildRecordedErrorResponse(err, redactionPatterns = []) {
+function buildRecordedErrorResponse(err, redactionPatterns = [], recordingContext = null) {
   const extraPatterns = [
     // Messages often contain tokens without JSON structure.
     {
@@ -216,6 +256,11 @@ function buildRecordedErrorResponse(err, redactionPatterns = []) {
   const requestId = getErrorRequestId(err);
   const classification = getErrorClassification(err);
   const response = redactBody(getErrorResponseBody(err), patterns);
+  const providerExchange = redactBody(getProviderExchange(err), patterns);
+  const failureRoutingMeta = getFailureRoutingMeta(err);
+  const recordedFailure = recordingContext
+    ? buildRecordedFailureRef(recordingContext)
+    : (err?.recordedFailure && typeof err.recordedFailure === 'object' ? err.recordedFailure : undefined);
 
   const debug = {};
 
@@ -250,8 +295,12 @@ function buildRecordedErrorResponse(err, redactionPatterns = []) {
       code: err?.code,
       ...(status !== undefined ? { status } : {}),
       ...(requestId !== undefined ? { requestId } : {}),
+      ...failureRoutingMeta,
       ...(classification !== undefined ? { classification } : {}),
       ...(response !== undefined ? { response } : {}),
+      ...(providerExchange.providerRequest !== undefined ? { providerRequest: providerExchange.providerRequest } : {}),
+      ...(providerExchange.providerResponse !== undefined ? { providerResponse: providerExchange.providerResponse } : {}),
+      ...(recordedFailure !== undefined ? { recordedFailure } : {}),
       debug: hasDebug ? debug : undefined
     }
   };
@@ -265,6 +314,13 @@ function rethrowRecordedError(response) {
   if (meta.status !== undefined) err.status = meta.status;
   if (meta.debug !== undefined) err.debug = meta.debug;
   if (meta.requestId !== undefined) err.requestId = meta.requestId;
+  if (meta.provider !== undefined) err.provider = meta.provider;
+  if (meta.failureCategory !== undefined) err.failureCategory = meta.failureCategory;
+  if (meta.failureCode !== undefined) err.failureCode = meta.failureCode;
+  if (meta.retryable !== undefined) err.retryable = meta.retryable;
+  if (meta.providerRequest !== undefined) err.providerRequest = meta.providerRequest;
+  if (meta.providerResponse !== undefined) err.providerResponse = meta.providerResponse;
+  if (meta.recordedFailure !== undefined) err.recordedFailure = meta.recordedFailure;
   if (meta.response !== undefined) {
     err.response = {
       status: meta.status,
@@ -523,11 +579,29 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
 
           return response;
         } catch (err) {
-          const errorResponse = buildRecordedErrorResponse(err, engine.redactionPatterns);
+          let errorResponse = buildRecordedErrorResponse(err, engine.redactionPatterns);
 
           // Best-effort: still record the failed interaction so replay has no gaps.
           try {
-            await engine.record(request, errorResponse);
+            const recorded = await engine.record(request, errorResponse);
+            const recordedFailure = buildRecordedFailureRef({
+              interaction: recorded?.interaction,
+              hash: recorded?.hash,
+              cassetteName,
+              storeDir,
+              request
+            });
+
+            if (errorResponse?.error && typeof errorResponse.error === 'object') {
+              errorResponse.error.recordedFailure = recordedFailure;
+            }
+            if (err && typeof err === 'object') {
+              err.recordedFailure = recordedFailure;
+            }
+
+            if (engine?.store && engine?.cassette) {
+              await engine.store.write(cassetteName, engine.cassette);
+            }
           } catch (recordErr) {
             // Do not mask the real transport error, but do not swallow the recording failure.
             // Attach redacted context so callers can debug missing interactions/cassette gaps.

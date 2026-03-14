@@ -459,6 +459,33 @@ describe('createTwinTransport - record behavior', () => {
       const err = new Error('wrapped upstream failure');
       err.name = 'WrappedProviderError';
       err.code = 'ERR_BAD_RESPONSE';
+      err.provider = 'openrouter';
+      err.failureCategory = 'rate_limit';
+      err.failureCode = 'http_429';
+      err.retryable = true;
+      err.providerRequest = {
+        method: 'POST',
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        headers: {
+          authorization: 'Bearer SHOULD_NOT_LEAK',
+          'content-type': 'application/json'
+        },
+        body: { model: 'openrouter/test-model' }
+      };
+      err.providerResponse = {
+        status: 429,
+        headers: {
+          'x-request-id': 'req_debug_123',
+          'retry-after': '3'
+        },
+        body: {
+          error: {
+            code: 429,
+            message: 'Rate limited',
+            metadata: { provider_name: 'openrouter' }
+          }
+        }
+      };
       err.debug = {
         provider: 'openrouter',
         response: {
@@ -493,9 +520,14 @@ describe('createTwinTransport - record behavior', () => {
       engineOptions: { createIfMissing: false }
     });
 
+    let recordedErr;
     await assert.rejects(
       () => transport.complete({ method: 'GET', url: 'https://api.example.com/debug-fallback', headers: {}, body: null }),
-      /wrapped upstream failure/
+      (err) => {
+        recordedErr = err;
+        assert.strictEqual(err.message, 'wrapped upstream failure');
+        return true;
+      }
     );
 
     const cassetteName = transport.getCassetteName();
@@ -505,6 +537,10 @@ describe('createTwinTransport - record behavior', () => {
 
     assert.strictEqual(recorded.error.status, 429);
     assert.strictEqual(recorded.error.requestId, 'req_debug_123');
+    assert.strictEqual(recorded.error.provider, 'openrouter');
+    assert.strictEqual(recorded.error.failureCategory, 'rate_limit');
+    assert.strictEqual(recorded.error.failureCode, 'http_429');
+    assert.strictEqual(recorded.error.retryable, true);
     assert.strictEqual(recorded.error.classification, 'retryable');
     assert.deepStrictEqual(recorded.error.response, {
       error: {
@@ -513,6 +549,40 @@ describe('createTwinTransport - record behavior', () => {
         metadata: { provider_name: 'openrouter' }
       }
     });
+    assert.deepStrictEqual(recorded.error.providerRequest, {
+      method: 'POST',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      headers: {
+        authorization: 'Bearer REDACTED',
+        'content-type': 'application/json'
+      },
+      body: { model: 'openrouter/test-model' }
+    });
+    assert.deepStrictEqual(recorded.error.providerResponse, {
+      status: 429,
+      headers: {
+        'x-request-id': 'req_debug_123',
+        'retry-after': '3'
+      },
+      body: {
+        error: {
+          code: 429,
+          message: 'Rate limited',
+          metadata: { provider_name: 'openrouter' }
+        }
+      }
+    });
+    assert.strictEqual(recorded.error.recordedFailure.version, 'digital-twin-router.recorded-failure/v1');
+    assert.strictEqual(recorded.error.recordedFailure.cassetteName, cassetteName);
+    assert.strictEqual(recorded.error.recordedFailure.storeDir, tempStore);
+    assert.strictEqual(recorded.error.recordedFailure.cassettePath, cassettePath);
+    assert.strictEqual(recorded.error.recordedFailure.interactionId, cassette.interactions[0].id);
+    assert.strictEqual(recorded.error.recordedFailure.requestHash, cassette.interactions[0].interactionId);
+    assert.deepStrictEqual(recorded.error.recordedFailure.request, {
+      method: 'GET',
+      url: 'https://api.example.com/debug-fallback'
+    });
+    assert.deepStrictEqual(recordedErr.recordedFailure, recorded.error.recordedFailure);
     assert.strictEqual(recorded.error.debug.response.status, 429);
     assert.strictEqual(recorded.error.debug.response.headers['x-request-id'], 'req_debug_123');
     assert.ok(!JSON.stringify(recorded).includes('SHOULD_NOT_LEAK'));
@@ -600,8 +670,36 @@ describe('createTwinTransport - record behavior', () => {
         code: 'EUPSTREAM',
         status: 418,
         requestId: 'req_replay_123',
+        provider: 'openrouter',
+        failureCategory: 'provider_response',
+        failureCode: 'http_418',
+        retryable: false,
         classification: 'retryable',
         response: { error: { code: 418, message: 'teapot' } },
+        providerRequest: {
+          method: 'POST',
+          url: 'https://openrouter.ai/api/v1/chat/completions',
+          headers: { 'content-type': 'application/json' },
+          body: { model: 'openrouter/test-model' }
+        },
+        providerResponse: {
+          status: 418,
+          headers: { 'x-request-id': 'req_replay_123' },
+          body: { error: { code: 418, message: 'teapot' } }
+        },
+        recordedFailure: {
+          version: 'digital-twin-router.recorded-failure/v1',
+          cassetteName,
+          storeDir: cassetteDir,
+          cassettePath: path.join(cassetteDir, `${cassetteName}.json`),
+          interactionId: 'entry_test_replay_1',
+          requestHash: 'hash_test_replay_1',
+          recordedAt: '2026-03-14T22:00:00.000Z',
+          request: {
+            method: 'GET',
+            url: 'https://api.example.com/error'
+          }
+        },
         debug: {
           why: 'teapot',
           response: {
@@ -629,11 +727,39 @@ describe('createTwinTransport - record behavior', () => {
         assert.strictEqual(err.code, 'EUPSTREAM');
         assert.strictEqual(err.status, 418);
         assert.strictEqual(err.requestId, 'req_replay_123');
+        assert.strictEqual(err.provider, 'openrouter');
+        assert.strictEqual(err.failureCategory, 'provider_response');
+        assert.strictEqual(err.failureCode, 'http_418');
+        assert.strictEqual(err.retryable, false);
         assert.deepStrictEqual(err.aiTargets, { classification: 'retryable' });
         assert.deepStrictEqual(err.response, {
           status: 418,
           data: { error: { code: 418, message: 'teapot' } },
           headers: { 'x-request-id': 'req_replay_123' }
+        });
+        assert.deepStrictEqual(err.providerRequest, {
+          method: 'POST',
+          url: 'https://openrouter.ai/api/v1/chat/completions',
+          headers: { 'content-type': 'application/json' },
+          body: { model: 'openrouter/test-model' }
+        });
+        assert.deepStrictEqual(err.providerResponse, {
+          status: 418,
+          headers: { 'x-request-id': 'req_replay_123' },
+          body: { error: { code: 418, message: 'teapot' } }
+        });
+        assert.deepStrictEqual(err.recordedFailure, {
+          version: 'digital-twin-router.recorded-failure/v1',
+          cassetteName,
+          storeDir: cassetteDir,
+          cassettePath: path.join(cassetteDir, `${cassetteName}.json`),
+          interactionId: 'entry_test_replay_1',
+          requestHash: 'hash_test_replay_1',
+          recordedAt: '2026-03-14T22:00:00.000Z',
+          request: {
+            method: 'GET',
+            url: 'https://api.example.com/error'
+          }
         });
         assert.deepStrictEqual(err.debug, {
           why: 'teapot',

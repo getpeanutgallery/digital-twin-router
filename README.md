@@ -9,6 +9,8 @@ Router/interceptor wrapper for integrating digital twin recording and replay wit
 - **Flexible Cassette Loading**: Load cassettes from local filesystem paths or installed npm packages.
 - **Strict Matching**: Uses `digital-twin-core`'s stable SHA-256 hashing for exact request matching.
 - **Clear Errors**: Detailed error messages on cache misses showing computed hash and available interactions.
+- **Recorded Failure Refs**: Recorded error payloads include stable `recordedFailure` cassette refs (`cassetteName`, `cassettePath`, entry `interactionId`, request hash) so upstream recovery artifacts can point back to replay-safe interactions.
+- **Provider Failure Fidelity**: Recorded/replayed errors preserve `providerRequest`, `providerResponse`, `provider`, `failureCategory`, `failureCode`, `retryable`, request ids, and normalized debug metadata emitted by `ai-providers`.
 
 ## Installation
 
@@ -76,6 +78,13 @@ const response = await transport.complete({
 | `engineOptions` | `Object` | Passed to `TwinEngine` (e.g., `normalizerOptions`). |
 
 **Returns:** object with `complete(request)` plus debug helpers.
+
+When `complete(request)` replays or records a transport failure, the thrown error may include additive metadata restored from the cassette, including:
+
+- `requestId`
+- `provider`, `failureCategory`, `failureCode`, `retryable`
+- `providerRequest`, `providerResponse`
+- `recordedFailure` with stable cassette/interaction refs for upstream recovery artifacts
 
 ### `resolveTwinPack(twinPack)`
 
