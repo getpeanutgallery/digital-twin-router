@@ -14,22 +14,18 @@ Router/interceptor wrapper for integrating digital twin recording and replay wit
 
 ## Installation
 
-Since this package depends on `digital-twin-core` which may be local, use a file dependency:
+Canonical polyrepo installs should use the published repo dependency via `git+ssh` (matching the sibling repos in this workspace):
 
 ```json
 {
   "dependencies": {
-    "digital-twin-router": "file:../digital-twin-router",
-    "digital-twin-core": "file:../digital-twin-core"
+    "digital-twin-router": "git+ssh://git@github.com/getpeanutgallery/digital-twin-router.git#main",
+    "digital-twin-core": "git+ssh://git@github.com/getpeanutgallery/digital-twin-core.git#main"
   }
 }
 ```
 
-Or install directly if published:
-
-```bash
-npm install digital-twin-router
-```
+For local development across sibling checkouts, point runtime config or test env at local pack paths (for example `DIGITAL_TWIN_PACK=../digital-twin-emotion-engine-providers`) rather than committing `file:` dependencies back into package manifests.
 
 ## Quick Start
 
