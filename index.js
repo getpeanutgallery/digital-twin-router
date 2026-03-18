@@ -399,12 +399,10 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
     const possibleSubDir = path.join(storePath, 'cassettes');
     const stats = fs.statSync(possibleSubDir);
     if (stats.isDirectory()) {
-      // Check if it contains any .json or .cassette files
-      const files = fs.readdirSync(possibleSubDir);
-      const hasCassettes = files.some(f => f.endsWith('.json') || f.endsWith('.cassette'));
-      if (hasCassettes) {
-        storeDir = possibleSubDir;
-      }
+      // Prefer the canonical cassettes/ directory whenever it exists, even if it is
+      // intentionally empty. This keeps first-write record mode from spilling new
+      // cassette files into the pack root.
+      storeDir = possibleSubDir;
     }
   } catch (e) {
     // If cassettes subdir doesn't exist or can't be read, keep storeDir = storePath

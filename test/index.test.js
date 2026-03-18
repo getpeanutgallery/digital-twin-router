@@ -952,6 +952,28 @@ describe('createTwinTransport - cassette resolution', () => {
     assert.strictEqual(transport.getStorePath(), packDir);
   });
 
+  test('records first-write cassette into cassettes/ when pack is intentionally empty', async () => {
+    const packDir = path.join(tempStore, 'empty-pack');
+    const cassettesDir = path.join(packDir, 'cassettes');
+    fs.mkdirSync(cassettesDir, { recursive: true });
+    process.env.DIGITAL_TWIN_CASSETTE = 'first-write';
+
+    const transport = createTwinTransport({
+      mode: 'record',
+      twinPack: packDir,
+      realTransport: mockTransport(),
+      engineOptions: { createIfMissing: false }
+    });
+
+    await transport.complete({
+      method: 'GET',
+      url: 'http://test.local/first-write'
+    });
+
+    assert.ok(fs.existsSync(path.join(cassettesDir, 'first-write.json')));
+    assert.ok(!fs.existsSync(path.join(packDir, 'first-write.json')));
+  });
+
   test('manifest and cassettes/ subdir combine correctly', () => {
     const packDir = path.join(tempStore, 'mypack');
     const cassettesDir = path.join(packDir, 'cassettes');

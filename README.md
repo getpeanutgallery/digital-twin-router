@@ -69,7 +69,7 @@ const response = await transport.complete({
 | Option | Type | Description |
 |--------|------|-------------|
 | `mode` | `string` (optional) | `'replay'`, `'record'`, `'off'`. Defaults based on `NODE_ENV` (test → replay) unless overridden. |
-| `twinPack` | `string` (required) | Path to a twin pack dir (local or npm package). Supports `manifest.json` + `defaultCassetteId`. Auto-detects `cassettes/` subdir. |
+| `twinPack` | `string` (required) | Path to a twin pack dir (local or npm package). Supports `manifest.json` + `defaultCassetteId`. Auto-detects and prefers a canonical `cassettes/` subdir when present, including first-write record mode for an intentionally empty pack. |
 | `realTransport` | `Function` | Async `(request) => response` used in record/off modes. |
 | `engineOptions` | `Object` | Passed to `TwinEngine` (e.g., `normalizerOptions`). |
 
