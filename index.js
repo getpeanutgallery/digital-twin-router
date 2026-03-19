@@ -20,6 +20,10 @@ const replayCursorByCassetteKey = new Map();
 const REQUEST_ID_HEADER_PATTERN = /(request[-_]?id|trace[-_]?id|correlation[-_]?id|x-amzn[-_]?requestid|cf-ray|openrouter[-_]?request[-_]?id)/i;
 const RECORDED_FAILURE_VERSION = 'digital-twin-router.recorded-failure/v1';
 
+function logRecordBreadcrumb(step, cassetteName) {
+  console.warn(`[digital-twin-router] ${step} cassette=${cassetteName || 'unknown'}`);
+}
+
 function stableStringify(value) {
   try {
     if (value === null || value === undefined) return '';
@@ -570,10 +574,14 @@ function createTwinTransport({ mode, twinPack, realTransport, engineOptions = {}
 
         try {
           // Perform the actual request
+          logRecordBreadcrumb('record.realTransport.await.start', cassetteName);
           const response = await realTransport(request);
+          logRecordBreadcrumb('record.realTransport.await.end', cassetteName);
 
           // Record the interaction
+          logRecordBreadcrumb('record.engine.record.await.start', cassetteName);
           await engine.record(request, response);
+          logRecordBreadcrumb('record.engine.record.await.end', cassetteName);
 
           return response;
         } catch (err) {
